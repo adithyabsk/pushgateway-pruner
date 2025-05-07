@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { resolve, pruneGroups, parseLabels, findFirstNonJobLabel } = require('./../src/functions')
+const { resolve, pruneGroups, parseLabels } = require('./../src/functions')
 
 jest.mock('axios');
 
@@ -15,6 +15,7 @@ const DEFAULT_METRICS_DATA =
     'pushgateway_http_requests_total{code="200",handler="healthy",method="get"} 12550\n' +
     'pushgateway_http_requests_total{code="200",handler="push",method="post"} 8445\n' +
     'pushgateway_http_requests_total{code="200",handler="ready",method="get"} 12550'
+const FAKE_URL = 'some_url/';
 
 function mockProcessEnv(envVar, envValue) {
     process.env[envVar] = envValue;
@@ -45,7 +46,11 @@ describe('Functions test', () => {
         });
 
         beforeEach(() => {
-            expect(axios.delete).toHaveBeenCalledTimes(0);
+            axios.get.mockReset();
+            axios.delete.mockReset();
+
+            mockGetMetricsResponse();
+            mockDeleteMetricsResponse();
         });
 
         afterEach(() => {
@@ -57,9 +62,20 @@ describe('Functions test', () => {
         });
 
         test('Simple prune process with one metric to be prune', async () => {
-            await pruneGroups('PUSHGATEWAY_URL', 60);
+            const metricsData =
+                '# HELP push_time_seconds Last Unix time when changing this group in the Pushgateway succeeded.\n' +
+                '# TYPE push_time_seconds gauge\n' +
+                'push_time_seconds{instance="instance_1",job="application_1"} 1.580688000e+09\n';
+            mockGetMetricsResponse(metricsData);
+            await pruneGroups(FAKE_URL, 60);
 
             expect(axios.delete).toHaveBeenCalledTimes(1);
+            const expectedJob = Buffer.from("application_1").toString('base64url');
+            const expectedInstance = Buffer.from("instance_1").toString('base64url');
+            expect(axios.delete).toHaveBeenCalledWith(
+                `${FAKE_URL}metrics/job@base64/${expectedJob}/instance@base64/${expectedInstance}`,
+                expect.any(Object)
+            );
         });
 
         test('Metric with no instance should not be deleted', async () => {
@@ -68,15 +84,36 @@ describe('Functions test', () => {
 
             mockGetMetricsResponse(metricsData);
 
-            await pruneGroups('PUSHGATEWAY_URL', 60);
+            await pruneGroups(FAKE_URL, 60);
 
             expect(axios.delete).toHaveBeenCalledTimes(0);
+        });
+
+        test('should correctly prune metric with multiple labels', async () => {
+            const multiLabelMetricsData =
+                '# HELP push_time_seconds Last Unix time when changing this group in the Pushgateway succeeded.\n' +
+                '# TYPE push_time_seconds gauge\n' +
+                'push_time_seconds{label1="test-123",instance="test-instance",job="test-job"} 1.580000000e+09\n';
+            
+            mockGetMetricsResponse(multiLabelMetricsData);
+            
+            await pruneGroups(FAKE_URL, 60);
+
+            expect(axios.delete).toHaveBeenCalledTimes(1);
+
+            const jobEncoded = Buffer.from("test-job").toString('base64url');
+            const label1Encoded = Buffer.from("test-123").toString('base64url'); 
+            const instanceEncoded = Buffer.from("test-instance").toString('base64url');
+            
+            const expectedUrl = `${FAKE_URL}metrics/job@base64/${jobEncoded}/instance@base64/${instanceEncoded}/label1@base64/${label1Encoded}`;
+            
+            expect(axios.delete).toHaveBeenCalledWith(expectedUrl, expect.any(Object));
         });
 
         test('When GET metric has an error raise an exception', async () => {
             mockGetMetricsResponse('', 500);
 
-            const request = pruneGroups('PUSHGATEWAY_URL', 60);
+            const request = pruneGroups(FAKE_URL, 60);
 
             await expect(request).rejects.toThrow();
         });
@@ -153,36 +190,6 @@ describe('Functions test', () => {
             const responseValue = parseLabels(stringLabels);
 
             expect(responseValue).toEqual(expectedValue);
-        });
-    });
-
-    describe('Find first non "job" label tests', () => {
-        test('should return the first non-"job" label name', () => {
-            const labels1 = { job: 'Developer', department: 'IT' };
-            expect(findFirstNonJobLabel(labels1)).toBe('department');
-
-            const labels2 = { job: 'Manager', location: 'Office' };
-            expect(findFirstNonJobLabel(labels2)).toBe('location');
-        });
-
-        test('should return the first non-"job" label name among multiple labels', () => {
-            const labels = { job: 'Developer', department: 'IT', location: 'Remote', team: 'Frontend' };
-            expect(findFirstNonJobLabel(labels)).toBe('department');
-        });
-
-        test('should return null if there are no non-"job" labels', () => {
-            const labels = { job: 'Designer' };
-            expect(findFirstNonJobLabel(labels)).toBeNull();
-        });
-
-        test('should return null for an empty object', () => {
-            const labels = {};
-            expect(findFirstNonJobLabel(labels)).toBeNull();
-        });
-
-        test('should handle objects with "job" property at the end', () => {
-            const labels = { department: 'HR', job: 'Recruiter' };
-            expect(findFirstNonJobLabel(labels)).toBe('department');
         });
     });
 })
