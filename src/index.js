@@ -18,6 +18,19 @@ const interval = setInterval(
     INTERVAL_SECONDS * 1000
 );
 
+// Handle termination signals
+process.on('SIGINT', () => {
+    logger.info('Received SIGINT. Shutting down gracefully...');
+    clearInterval(interval);
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    logger.info('Received SIGTERM. Shutting down gracefully...');
+    clearInterval(interval);
+    process.exit(0);
+});
+
 module.exports = {
     pruneGroups,
     interval

@@ -109,6 +109,7 @@ function filterOldGroupings(groupings, pruneThresholdSeconds) {
     const filteredGroupings = [];
     const now = new Date();
     for (let i = 0; i < groupings.length; ++i) {
+        // Only include groupings that are old enough
         if ((now - groupings[i].timestamp) > pruneThresholdSeconds * 1000) {
             filteredGroupings.push(groupings[i]);
         }
@@ -121,48 +122,54 @@ function filterOldGroupings(groupings, pruneThresholdSeconds) {
 
 async function deleteGrouping(grouping, pushgatewayUrl) {
     logger.debug('deleteGrouping()', grouping);
-
-    const job = grouping.labels.job;
-    // This will most probably be "instance"
-    const labelName = findFirstNonJobLabel(grouping.labels);
-    if (!labelName) {
-        throw new Error(`Grouping from job ${job} does not have suitable labels (e.g. instance)`);
+    
+    const labels = grouping.labels;
+    if (!labels || !labels.job) {
+        throw new Error('Grouping does not have a job label which is required');
     }
-    const labelValue = grouping.labels[labelName];
-    if (!labelValue) {
-        logger.info(`Did not delete grouping from job ${job} because value of label ${labelName} is empty.`)
-        return;
+    
+    if (!labels.instance) {
+        logger.debug(`Skipping grouping from job ${labels.job} because it has no instance label`);
+        throw new Error(`Grouping from job ${labels.job} does not have an instance label which is required`);
     }
 
-    const url = pushgatewayUrl + encodeURIComponent(`metrics/job/${job}/${labelName}/${labelValue}`);
+    // Build URL path with all labels, starting with job (by convention)
+    // Format: metrics/job@base64/encodedJobValue/label1@base64/encodedValue1/...
+    let urlPath = 'metrics/job@base64/' + Buffer.from(labels.job).toString('base64url');
+    
+    // Add all other labels (alphabetically for determinism)
+    Object.keys(labels)
+        .filter(label => label !== 'job')
+        .sort()
+        .forEach(label => {
+            const encodedValue = Buffer.from(labels[label]).toString('base64url');
+            urlPath += `/${label}@base64/${encodedValue}`;
+        });
+
+    const url = `${pushgatewayUrl}${urlPath}`;
     logger.debug(`Delete URL: ${url}`);
-    const deleteResponse = await axios.delete(url, {
-        timeout: 2000
-    });
+    
+    try {
+        const deleteResponse = await axios.delete(url, {
+            timeout: 2000
+        });
 
-    if (!deleteResponse || deleteResponse && (deleteResponse.status >= 300)) {
-        logger.debug(`ERROR: DELETE ${url} failed`);
-        let msg = 'unknown failure';
-        if (deleteResponse) {
-            msg = `unexpected status code ${deleteResponse.status}`;
+        if (!deleteResponse || deleteResponse.status >= 300) {
+            let msg = deleteResponse ? `unexpected status code ${deleteResponse.status}` : 'unknown failure';
+            logger.debug(`ERROR: DELETE ${url} failed: ${msg}`);
+            throw new Error(`DELETE ${url} failed: ${msg}`);
         }
-        logger.debug(msg);
-        throw new Error(`DELETE ${url} failed: ${msg}`);
+
+        logger.debug(`DELETE ${url} succeeded, status code ${deleteResponse.status}`);
+        logger.info('Deleted grouping', labels);
+    } catch (error) {
+        logger.error(`DELETE request failed: ${error.message}`);
+        throw error;
     }
-
-    logger.debug(`DELETE ${url} succeeded, status code ${deleteResponse.status}`);
-    logger.info('Deleted grouping', grouping.labels);
-}
-
-function findFirstNonJobLabel(labels) {
-    const nonJobLabel = Object.keys(labels)
-        .find(propName => propName !== 'job');
-    return nonJobLabel || null;
 }
 
 module.exports = {
     resolve,
     pruneGroups,
     parseLabels,
-    findFirstNonJobLabel,
 }
